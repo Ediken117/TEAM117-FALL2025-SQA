@@ -1,0 +1,96 @@
+name: Automated Fuzzing Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+    # Allow manual triggering
+    inputs:
+      iterations:
+        description: 'Number of fuzzing iterations per method'
+        required: false
+        default: '20'
+
+jobs:
+  fuzz-testing:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # Install any required dependencies
+        pip install GitPython pandas numpy
+        
+    - name: Run fuzzing tests
+      id: fuzz
+      continue-on-error: true
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          python fuzz.py ${{ github.event.inputs.iterations }}
+        else
+          python fuzz.py
+        fi
+        
+    - name: Upload fuzzing report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: fuzz-report
+        path: |
+          fuzz_report.txt
+          *_forensics.log
+        retention-days: 30
+        
+    - name: Display report summary
+      if: always()
+      run: |
+        if [ -f fuzz_report.txt ]; then
+          echo "### Fuzzing Report Summary" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          head -n 20 fuzz_report.txt >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Full report available in artifacts." >> $GITHUB_STEP_SUMMARY
+        fi
+        
+    - name: Check for critical bugs
+      if: always()
+      run: |
+        if [ -f fuzz_report.txt ]; then
+          BUGS=$(grep -c "^BUG #" fuzz_report.txt || echo "0")
+          echo "Bugs found: $BUGS"
+          
+          if [ "$BUGS" -gt 0 ]; then
+            echo "::warning::$BUGS bugs detected during fuzzing!"
+            exit 1
+          fi
+        fi
+        
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          if (fs.existsSync('fuzz_report.txt')) {
+            const report = fs.readFileSync('fuzz_report.txt', 'utf8');
+            const lines = report.split('\n').slice(0, 30).join('\n');
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔍 Fuzzing Test Results\n\n\`\`\`\n${lines}\n\`\`\`\n\nFull report available in artifacts.`
+            });
+          }
